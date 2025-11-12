@@ -4,9 +4,11 @@ using JuMP, Ipopt, DataFrames, Plots, Statistics
 dt = 1.0  # 时间步长（小时）
 N = 24    # 预测时域（24小时）
 C_bat = 210.0  # 单块电池容量（kWh）
+
 eta_ch = 0.95   # 充电效率
 eta_dis = 0.95  # 放电效率
 #注意：充放电效率基于实际应用中常见的电池参数合理推断
+
 P_max = 50.0    # 最大充放电功率（kW）
 SOC_init = 0.5  # 初始SOC
 SOC_min = 0.2   # 最小SOC
@@ -20,7 +22,7 @@ rho = [0.12, 0.11, 0.10, 0.10, 0.11, 0.15, 0.20, 0.18, 0.16, 0.14, 0.13, 0.14,
 model = Model(Ipopt.Optimizer)
 set_optimizer_attribute(model, "max_iter", 10000) # 设置最大迭代次数
 set_optimizer_attribute(model, "tol", 1e-6)       # 设置收敛容差精度
-set_optimizer_attribute(model, "print_level", 0)  # 减少输出
+set_optimizer_attribute(model, "print_level", 0)  # 输出具体精度
 
 # 2.1 定义决策变量 - 使用单一功率变量
 @variable(model, -P_max <= P[1:N] <= P_max)  # 充放电功率（负为充，正为放）
@@ -30,16 +32,26 @@ set_optimizer_attribute(model, "print_level", 0)  # 减少输出
 # 初始SOC约束
 @constraint(model, SOC[1] == SOC_init)
 
-# 状态转移约束 - 使用近似线性处理
+#带入效率计算时存在问题，先用简单模型拟合，后续更新
+#=状态转移约束 - 使用近似线性处理
+
 for i in 1:N
     # 使用平均效率近似，避免非线性
     eta_avg = (eta_ch + 1/eta_dis) / 2  # 平均效率
-    @constraint(model, SOC[i+1] == SOC[i] + (P[i] * dt * eta_avg) / C_bat)
+    @constraint(model, SOC[i+1] == SOC[i] - (P[i] * dt * eta_avg) / C_bat)
 end
 
+=#
+
+# SOC更新保持简单物理
+for i in 1:N
+    @constraint(model, SOC[i+1] == SOC[i] - (P[i] * dt) / C_bat)
+end
+
+for i in 1:N
 # 2.3 目标函数：最大化套利收益
 @objective(model, Max, sum(P[i] * rho[i] * dt for i in 1:N))
-
+end
 # 3. 求解模型
 println("开始求解...")
 optimize!(model)
@@ -91,20 +103,19 @@ if status == MOI.OPTIMAL || status == MOI.LOCALLY_SOLVED || status == MOI.ALMOST
     println()
     
     # 可视化结果
-    p1 = plot(1:N, rho, label="电价", xlabel="小时", ylabel="电价 (USD/kWh)", 
-             line=:steppost, title="电价曲线", color=:blue, legend=:topleft)
-    
-    p2 = plot(1:N, P_opt, label="充放电功率", xlabel="小时", ylabel="功率 (kW)",
-             line=:steppost, title="充放电策略", color=:red, legend=:topleft)
-    hline!([0], label="", color=:black, linestyle=:dash, alpha=0.5)
-    
-    p3 = plot(0:N, SOC_opt, label="SOC", xlabel="小时", ylabel="SOC", 
-             title="SOC演化", color=:green, legend=:bottomright)
-    hline!([SOC_min, SOC_max], label=["SOC_min" "SOC_max"], 
-           color=[:red :red], linestyle=:dash, alpha=0.5)
-    
-    plot(p1, p2, p3, layout=(3,1), size=(800, 800))
-    
+    p1 = plot(1:N, rho, label="Electricity Price", 
+          xlabel="Hour", ylabel="Price (USD/kWh)", 
+          line=:steppost, title="Electricity Price Curve", color=:blue)
+
+    p2 = plot(1:N, P_opt, label="Charge/Discharge Power", 
+          xlabel="Hour", ylabel="Power (kW)",
+          line=:steppost, title="Power Strategy", color=:red)
+
+    p3 = plot(0:N, SOC_opt, label="SOC", 
+          xlabel="Hour", ylabel="SOC", 
+          title="SOC Evolution", color=:green)
+
+plot(p1, p2, p3, layout=(3,1), size=(800, 800))
     # 保存结果
     savefig("arbitrage_results.png")
     println("\n结果图已保存为 arbitrage_results.png")
