@@ -1,79 +1,98 @@
-using JuMP, Ipopt, DataFrames
+using JuMP, Ipopt, DataFrames, Plots
 
-# 1.1 时间与电池参数（根据需求调整）
-dt = 1  # 时间步长（小时）
-N = 24  # 预测时域（24小时）
-C_bat = 210.0  # 单块电池容量（kWh，参考文章NIO换电站单电池容量）
-eta_ch = 0.95  # 充电效率
+# 1.1 时间与电池参数
+dt = 1.0  # 时间步长（小时）
+N = 24    # 预测时域（24小时）
+C_bat = 210.0  # 单块电池容量（kWh）
+eta_ch = 0.95   # 充电效率
 eta_dis = 0.95  # 放电效率
-P_max = 50.0  # 最大充放电功率（kW，负为充，正为放）
+P_max = 50.0    # 最大充放电功率（kW）
 SOC_init = 0.5  # 初始SOC
-SOC_min = 0.2  # 最小SOC（避免过放）
-SOC_max = 0.9  # 最大SOC（避免过充）
+SOC_min = 0.2   # 最小SOC
+SOC_max = 0.9   # 最大SOC
 
-# 1.2 24小时日前市场电价数据（单位USD/kWh）
-# 模拟电价：凌晨低、早高峰高、晚高峰高（符合“电价波动套利”逻辑,ai生成未使用PJM真实数据）
+# 1.2 24小时日前市场电价数据（USD/kWh）
 rho = [0.12, 0.11, 0.10, 0.10, 0.11, 0.15, 0.20, 0.18, 0.16, 0.14, 0.13, 0.14,
        0.15, 0.16, 0.17, 0.22, 0.25, 0.23, 0.19, 0.17, 0.15, 0.14, 0.13, 0.12]
 
-# 创建JuMP模型，指定IPOPT求解器（无整数变量，用非线性求解器即可）
-model = Model(Ipopt.Optimizer)
-# 关键修改：创建模型时指定IPOPT求解器，并设置最大迭代次数（如5000次，可根据需要调整）
-model = Model(()->Ipopt.Optimizer(
-    "max_iter" => 5000,  # 核心参数：最大迭代次数，默认1000，此处改为5000
-    "tol" => 1e-6,       # 可选：松弛收敛精度（默认1e-8），适当放宽可加快收敛
-    "print_level" => 3   # 可选：打印求解过程（1=少，5=多），便于排查问题
+# 创建JuMP模型
+model = Model(() -> Ipopt.Optimizer(
+    "max_iter" => 5000,
+    "tol" => 1e-6,
+    "print_level" => 0  # 减少输出噪音
 ))
 
-# 2.1 定义决策变量（控制输入P_i + 状态变量SOC_i）
-@variable(model, P[1:N])  # 每小时充放电功率（kW）
-@variable(model, SOC[1:N+1])  # SOC_i对应第i步结束时的状态（共25个点：1→24+1）
+# 2.1 定义决策变量
+@variable(model, -P_max <= P[1:N] <= P_max)  # 充放电功率（负为充，正为放）
+@variable(model, SOC_min <= SOC[1:N+1] <= SOC_max)  # SOC状态变量
 
-# 2.2 约束条件（对应文章中“s.t.”部分）
+# 2.2 约束条件
 # 初始SOC约束
 @constraint(model, SOC[1] == SOC_init)
 
-# 状态转移约束（逐时间步更新SOC，分充电/放电逻辑）
+# 正确的状态转移约束（单一方程，考虑效率）
 for i in 1:N
-    # 充电场景（P[i] < 0：购电，功率取绝对值）
-    @constraint(model, SOC[i+1] >= SOC[i] + (abs(P[i]) * dt * eta_ch) / C_bat)
-    # 放电场景（P[i] > 0：售电，需除以放电效率）
-    @constraint(model, SOC[i+1] <= SOC[i] - (P[i] * dt) / (eta_dis * C_bat))
-    # 功率边界约束
-    @constraint(model, P[i] >= -P_max)
-    @constraint(model, P[i] <= P_max)
-    # SOC安全约束（每步结束后SOC需在范围内）
-    @constraint(model, SOC[i+1] >= SOC_min)
-    @constraint(model, SOC[i+1] <= SOC_max)
+    # 统一的状态转移方程
+    # 充电时(P[i] < 0): SOC增加 = |P[i]| * η_ch * dt / C_bat
+    # 放电时(P[i] > 0): SOC减少 = P[i] * dt / (η_dis * C_bat)
+    @constraint(model, SOC[i+1] == SOC[i] + 
+        (ifelse(P[i] < 0, -P[i] * eta_ch, P[i] / eta_dis) * dt) / C_bat)
 end
 
-# 2.3 目标函数（最大化24小时套利净收益，对应文章中“max R”）
-# 收益单位：USD（功率kW * 电价USD/kWh * 时间h = USD）
+# 2.3 目标函数：最大化套利收益
 @objective(model, Max, sum(P[i] * rho[i] * dt for i in 1:N))
 
-# 求解模型（IPOPT会自动处理非线性约束）
+# 3. 求解模型
 optimize!(model)
 
-# 3.1 提取结果（判断求解状态，确保可行）
+# 4. 结果处理和分析
 if termination_status(model) == MOI.OPTIMAL
     println("优化求解成功！")
-    # 提取最优功率和SOC
-    P_opt = value.(P)  # 最优充放电功率（kW）
-    SOC_opt = value.(SOC)  # 最优SOC轨迹
-    total_profit = objective_value(model)  # 总套利收益（USD）
     
-    # 3.2 整理结果为DataFrame（便于查看和后续分析）
+    # 提取结果
+    P_opt = value.(P)
+    SOC_opt = value.(SOC)
+    total_profit = objective_value(model)
+    
+    # 计算每小时收益
+    hourly_profit = P_opt .* rho .* dt
+    
+    # 整理结果
     result_df = DataFrame(
-        Hour = 1:N,  # 第1-24小时
+        Hour = 1:N,
         Price_USD_per_kWh = rho,
-        Opt_Power_kW = round.(P_opt, digits=2),  # 四舍五入保留2位小数
-        SOC_End = round.(SOC_opt[2:end], digits=3),  # 每小时结束时的SOC
-        Hourly_Profit_USD = round.(P_opt .* rho .* dt, digits=2)  # 每小时收益
+        Power_kW = round.(P_opt, digits=3),
+        SOC_Start = round.(SOC_opt[1:end-1], digits=3),
+        SOC_End = round.(SOC_opt[2:end], digits=3),
+        Hourly_Profit_USD = round.(hourly_profit, digits=3)
     )
-    # 打印结果
-    println("\n24小时套利优化结果：")
-    println(result_df)
-    println("\n总套利收益：", round(total_profit, digits=2), " USD")
+    
+    # 打印摘要信息
+    println("\n=== 24小时套利优化结果 ===")
+    println("总套利收益: ", round(total_profit, digits=2), " USD")
+    println("充电时段: ", count(x -> x < 0, P_opt), " 小时")
+    println("放电时段: ", count(x -> x > 0, P_opt), " 小时")
+    println("闲置时段: ", count(x -> x == 0, P_opt), " 小时")
+    
+    println("\n详细结果:")
+    show(result_df, allrows=true)
+    
+    # 可视化结果
+    p1 = plot(1:N, rho, label="电价", xlabel="小时", ylabel="电价 (USD/kWh)", 
+             line=:steppost, title="电价曲线", color=:blue)
+    
+    p2 = plot(1:N, P_opt, label="充放电功率", xlabel="小时", ylabel="功率 (kW)",
+             line=:steppost, title="充放电策略", color=:red)
+    hline!([0], label="", color=:black, linestyle=:dash)
+    
+    p3 = plot(0:N, SOC_opt, label="SOC", xlabel="小时", ylabel="SOC", 
+             title="SOC演化", color=:green)
+    hline!([SOC_min, SOC_max], label=["SOC_min" "SOC_max"], 
+           color=[:red :red], linestyle=:dash)
+    
+    plot(p1, p2, p3, layout=(3,1), size=(800, 600))
+    
 else
-    println("优化求解失败，原因：", termination_status(model))
+    println("优化求解失败，原因: ", termination_status(model))
+    println("原始状态: ", raw_status(model))
 end
