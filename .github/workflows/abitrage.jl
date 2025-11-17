@@ -1,4 +1,4 @@
-using JuMP, Ipopt, DataFrames, Plots, Statistics, CSVim
+using JuMP, Ipopt, DataFrames, Plots, Statistics, CSV
 
 # 1.1 时间与电池参数
 dt = 1.0  # 时间步长（小时）
