@@ -1,8 +1,6 @@
 using JuMP, Ipopt, DataFrames, Plots, Statistics, CSV
 
-# ==========================================
 # 1. 参数定义
-# ==========================================
 
 # 1.1 仿真时间设置
 dt_h = 1.0              # 时间步长 (小时)
@@ -70,15 +68,13 @@ function OCV_n(theta)
            0.7984 * exp(0.4465 * theta - 0.4108)
 end
 
-# ==========================================
 # 3. 优化模型构建
-# ==========================================
 
 # 创建JuMP优化模型，使用Ipopt求解器
 model = Model(Ipopt.Optimizer)
 
 # 设置求解器参数
-set_optimizer_attribute(model, "max_iter", 3000)  # 最大迭代次数
+set_optimizer_attribute(model, "max_iter", 5000)  # 最大迭代次数
 set_optimizer_attribute(model, "tol", 1e-4)       # 收敛容差
 set_optimizer_attribute(model, "print_level", 5)  # 输出详细程度
 
