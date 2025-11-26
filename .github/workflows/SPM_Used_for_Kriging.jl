@@ -114,7 +114,8 @@ function generate_random_state_input(params::SPMParameters)
     return state, input
 end
 
-# 完整的SPM状态增量计算函数
+
+# # 完整的SPM状态增量计算函数
 function calculate_SPM_state_increment(params::SPMParameters, state, input, dt=1.0)
     """
     完整的SPM状态增量计算,包含Butler-Volmer动力学
@@ -124,22 +125,23 @@ function calculate_SPM_state_increment(params::SPMParameters, state, input, dt=1
     
     # 迭代求解电流和电位
     converged = false
+    count_iter = 0
     max_iter = 20
     tol = 1e-6
-    i_guess = 0.1  # 初始电流猜测
+    i_guess = 50  # 初始电流猜测
   
     for iter in 1:max_iter
         # 1. 浓度计算
         C_p_surf = C_p_avg - (params.R_p / 5) * i_guess / (params.F * params.D_p * params.a_p * params.l_p)
         C_n_surf = C_n_avg + (params.R_n / 5) * i_guess / (params.F * params.D_n * params.a_n * params.l_n)
-        
+        # 确保浓度在合理范围内
         C_p_surf = max(0.01 * params.C_p_max, min(0.99 * params.C_p_max, C_p_surf))
         C_n_surf = max(0.01 * params.C_n_max, min(0.99 * params.C_n_max, C_n_surf))
         
         # 2. OCV计算
-        θ_p = C_p_surf / params.C_p_max
+        θ_p = C_p_surf / params.C_p_max #公式3.5
         θ_n = C_n_surf / params.C_n_max
-        U_p = OCV_positive(θ_p)
+        U_p = OCV_positive(θ_p)         #Genetic论文OCV函数
         U_n = OCV_negative(θ_n)
         
         # 3. Butler-Volmer动力学
@@ -147,7 +149,11 @@ function calculate_SPM_state_increment(params::SPMParameters, state, input, dt=1
         J_p = 2 * params.k_p * params.C_e^0.5 * 
               (params.C_p_max - C_p_surf)^0.5 * (C_p_surf)^0.5 *
               sinh(0.5 * params.F * (φ_p_guess - U_p) / (params.R * params.T))
+            #含义：正极单位体积的反应电流（左侧），由反应速率常数（\(k_p\)）、电解质浓度（\(C_e\)）、表面锂浓度（\(C_{p}^{surf}\)）、过电位（\(\phi_p - U_p\)）共同决定
+        #论文公式3.7
+
         i_p_calc = J_p * params.a_p * params.F * params.l_p
+        # 正极总电流 = 电流密度 × 表面积 × 法拉第常数 × 厚度
         
         φ_n_guess = U_n - 0.1
         J_n = 2 * params.k_n * params.C_e^0.5 * 
@@ -155,8 +161,11 @@ function calculate_SPM_state_increment(params::SPMParameters, state, input, dt=1
               sinh(0.5 * params.F * 
               (φ_n_guess - U_n + (δ_SEI / params.κ_SEI) * (i_guess / (params.a_n * params.l_n))) / 
               (params.R * params.T))
+              # 负极反应电流密度，来自论文式(3.8)，包含SEI电阻影响
+
         i_n_calc = -J_n * params.a_n * params.F * params.l_n
-        
+        # 负极总电流 = 电流密度 × 表面积 × 法拉第常数 × 厚度
+        count_iter += 1
         # 4. 电流连续性检查
         i_new = (i_p_calc + i_n_calc) / 2
         
@@ -168,11 +177,13 @@ function calculate_SPM_state_increment(params::SPMParameters, state, input, dt=1
         i_guess = i_new
     end
     
+    println("迭代次数: $count_iter, 收敛: $converged, 最终电流: $i_guess A")
+
     if !converged
         println("迭代未收敛，使用最后的电流猜测值")
-        i_guess = P * 1000 / 3.7
+        i_guess = 0.1
     end
-    
+
     # 使用最终电流重新计算相关量
     C_p_surf = C_p_avg - (params.R_p / 5) * i_guess / (params.F * params.D_p * params.a_p * params.l_p)
     C_n_surf = C_n_avg + (params.R_n / 5) * i_guess / (params.F * params.D_n * params.a_n * params.l_n)

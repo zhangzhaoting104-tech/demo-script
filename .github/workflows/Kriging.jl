@@ -131,7 +131,7 @@ function generate_weekly_training_data()
     # inputs, outputs = generate_SPM_data_with_timestep(168.0)  # 168小时 = 1周
     
     # 暂时先加载现有数据并调整时间尺度
-    df = CSV.read("D:\\vscode codes\\demo-script\\spm_training_data_corrected.csv", DataFrame)
+    df = CSV.read("D:\\vscode codes\\demo-script\\spm_training_data.csv", DataFrame)
     
     inputs = Matrix(df[:, [:C_p_avg, :C_n_avg, :δ_SEI_nm, :c_f_Ah, :P_kW]])
     outputs = Matrix(df[:, [:ΔC_p_avg, :ΔC_n_avg, :Δδ_SEI_pm, :Δc_f_μAh]])

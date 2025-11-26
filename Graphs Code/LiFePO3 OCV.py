@@ -2,16 +2,22 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 def OCV_positive(theta_p):
-    return 3.4 + 0.5 * (1 - np.exp(-5 * (1 - theta_p))) - 0.3 * (1 - np.exp(-5 * theta_p))
+    if theta_p < 0.05:
+        return 3.30 + 2.0 * theta_p
+    elif theta_p < 0.95:  
+        return 3.40  # 主要平坦平台
+    else:
+        # 当theta_p >= 0.95时的返回值
+        return 3.40 + 2.0 * (theta_p - 0.95)  # 示例：添加一个斜率
 
 def OCV_negative(theta_n):
-    return 0.1 + 0.8 * theta_n - 0.3 * theta_n**2
+    return 0.12 + 0.15 * theta_n + 0.05 * theta_n**2
 
 # Generate SOC data
 soc = np.linspace(0, 1, 100)
 
 # Calculate OCV values
-ocv_p = OCV_positive(soc)
+ocv_p = [OCV_positive(x) for x in soc]  # 使用列表推导式处理每个值
 ocv_n = OCV_negative(soc)
 
 # Plot
