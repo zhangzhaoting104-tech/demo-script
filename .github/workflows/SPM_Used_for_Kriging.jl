@@ -181,7 +181,7 @@ function calculate_SPM_state_increment(params::SPMParameters, state, input, dt=1
 
     if !converged
         println("迭代未收敛，使用最后的电流猜测值")
-        i_guess = 0.1
+        i_guess = 50
     end
 
     # 使用最终电流重新计算相关量

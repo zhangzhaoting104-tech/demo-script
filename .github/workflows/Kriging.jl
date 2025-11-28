@@ -20,7 +20,7 @@ function build_kernel_matrix(X, theta)
     for i in 1:n, j in 1:n
         K[i,j] = rbf_kernel(X[i,:], X[j,:], theta)
     end
-    return K + 1e-8I
+    return K + 1e-10I
 end
 
 # 修正的长度尺度参数分配
@@ -113,7 +113,7 @@ function validate_training_data(inputs, outputs)
     println("  平均值: $(mean(outputs[:,3])) m")
     println("  非零SEI增量样本: $(sum(abs.(outputs[:,3]) .> 1e-15))/$(size(outputs,1))")
     
-    significant_sei = outputs[:,3] .> 1e-12
+    significant_sei = outputs[:,3] .> 1e-18
     if sum(significant_sei) == 0
         println("⚠️ 警告: 训练数据中没有显著的SEI增量!")
     else
