@@ -102,8 +102,8 @@ end
 function generate_random_state_input(params::SPMParameters)
     # 生成随机状态 [C_p_avg, C_n_avg, δ_SEI, c_f]
     state = [
-        rand(0.2:0.01:0.8) * params.C_p_max,  # C_p_avg: 10%-90% of max
-        rand(0.2:0.01:0.8) * params.C_n_max,  # C_n_avg: 10%-90% of max
+        rand(0.2:0.01:0.8) * params.C_p_max,  # C_p_avg: 10%-80% of max
+        rand(0.2:0.01:0.8) * params.C_n_max,  # C_n_avg: 10%-80% of max
         rand(0.0:1e-10:5e-8),                 # δ_SEI: 0 to 100 nm
         rand(0.0:0.1:50.0)                    # c_f: 0 to 50 Ah capacity fade
     ]
