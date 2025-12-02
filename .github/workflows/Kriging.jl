@@ -36,9 +36,9 @@ function get_physical_based_theta()
     # theta越大表示该特征对相似度计算的影响越大（越重要）
     theta[1] = 1    # C_p_avg: 较低敏感性
     theta[2] = 1    # C_n_avg: 较低敏感性
-    theta[3] = 10.0   # δ_SEI: 最高敏感性 - SEI厚度对老化影响最大
-    theta[4] = 10.0   # c_f: 最高敏感性 - 容量衰减是关键老化指标
-    theta[5] = 5.0    # P: 中等敏感性 - 功率影响老化速率
+    theta[3] = 1.5   # δ_SEI: 最高敏感性 - SEI厚度对老化影响最大
+    theta[4] = 1.5   # c_f: 最高敏感性 - 容量衰减是关键老化指标
+    theta[5] = 1.2    # P: 中等敏感性 - 功率影响老化速率
     return theta
 end
 
@@ -183,7 +183,7 @@ function analyze_feature_importance(model::KrigingModel, feature_names)
     
     # 计算相对重要性百分比
     total_theta = sum(model.theta)
-    println("\n相对重要性（百分比）:")
+    println("\n相对重要性(百分比):")
     for i in 1:length(model.theta)
         relative_importance = model.theta[i] / total_theta * 100
         println("  $(feature_names[i]): $(round(relative_importance, digits=1))%")
@@ -202,7 +202,7 @@ function validate_training_data(inputs, outputs)
         println("  $(feature_names[i]): [$(round(min_val, digits=2)), $(round(max_val, digits=2))] | 均值: $(round(mean_val, digits=2))")
     end
     
-    println("\n输出数据范围（一周增量）:")
+    println("\n输出数据范围(一周增量):")
     output_names = ["ΔC_p_avg", "ΔC_n_avg", "Δδ_SEI_pm", "Δc_f_μAh"]
     for i in 1:4
         min_val = minimum(outputs[:,i])
@@ -265,7 +265,7 @@ end
 
 # 主函数
 function main()
-    println("加载并调整SPM训练数据（一周时间步长）...")
+    println("加载并调整SPM训练数据(一周时间步长)...")
     
     # 使用一周时间步长的数据
     inputs, outputs = generate_weekly_training_data()
@@ -298,7 +298,7 @@ function use_kriging_model(model, norm_params)
 end
 
 # 运行训练
-println("开始基于物理意义的Kriging代理模型训练（一周时间步长）...")
+println("开始基于物理意义的Kriging代理模型训练(一周时间步长)...")
 model, norm_params = main()
 
 # 创建预测函数
@@ -306,7 +306,7 @@ kriging_predictor = use_kriging_model(model, norm_params)
 
 # 测试预测
 println("\n" * "="^50)
-println("模型预测测试（一周增量）:")
+println("模型预测测试(一周增量):")
 println("="^50)
 
 test_points = [

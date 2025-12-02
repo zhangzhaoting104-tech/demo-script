@@ -115,7 +115,7 @@ function generate_random_state_input(params::SPMParameters)
 end
 
 
-# # 完整的SPM状态增量计算函数
+# 完整的SPM状态增量计算函数
 function calculate_SPM_state_increment(params::SPMParameters, state, input, dt=1.0)
     """
     完整的SPM状态增量计算,包含Butler-Volmer动力学
@@ -128,7 +128,7 @@ function calculate_SPM_state_increment(params::SPMParameters, state, input, dt=1
     count_iter = 0
     max_iter = 20
     tol = 1e-6
-    i_guess = 50  # 初始电流猜测
+    i_guess = 40.0  # 初始电流猜测
   
     for iter in 1:max_iter
         # 1. 浓度计算
@@ -177,11 +177,11 @@ function calculate_SPM_state_increment(params::SPMParameters, state, input, dt=1
         i_guess = i_new
     end
     
-    println("迭代次数: $count_iter, 收敛: $converged, 最终电流: $i_guess A")
+    #println("迭代次数: $count_iter, 收敛: $converged, 最终电流: $i_guess A")
 
     if !converged
         println("迭代未收敛，使用最后的电流猜测值")
-        i_guess = 50
+        i_guess = 40.0
     end
 
     # 使用最终电流重新计算相关量
