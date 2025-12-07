@@ -3,246 +3,295 @@ module KrigingModelModule
 using CSV, DataFrames, LinearAlgebra, Statistics
 
 # 导出主要函数
-export KrigingModel, train_kriging, predict, use_kriging_model, load_training_data,
-       create_and_train_kriging_model
+export KrigingModel, MultiKrigingModel, train_kriging, predict, use_kriging_model, 
+       load_training_data, create_and_train_kriging_model
 
-# Kriging模型结构体
+# 单输出Kriging模型结构体
 struct KrigingModel
-    X_train::Matrix{Float64}    # 训练输入
-    y_train::Matrix{Float64}    # 训练输出  
-    theta::Vector{Float64}      # RBF长度尺度参数（越大越重要）
-    alpha::Matrix{Float64}      # 权重向量
-    scaling_factors::Tuple      # 缩放因子信息
-    norm_params::NamedTuple     # 标准化参数
+    X_train::Matrix{Float64}    # 标准化后的训练输入
+    y_train::Vector{Float64}    # 标准化后的训练输出（单输出）
+    theta::Vector{Float64}      # RBF长度尺度参数
+    alpha::Vector{Float64}      # 权重向量
+    X_mean::Vector{Float64}     # 输入均值（用于标准化）
+    X_std::Vector{Float64}      # 输入标准差（用于标准化）
+    y_mean::Float64             # 输出均值（用于标准化）
+    y_std::Float64              # 输出标准差（用于标准化）
+    nugget::Float64             # 正则化参数
+    output_scaling_factor::Float64  # 输出缩放因子
 end
 
-# 正确的RBF核函数（根据公式3.17）
-function rbf_kernel(x1, x2, theta)
-    # ∏_{d=1}^{D} exp(-θ_d |x_d - x'_d|^2)
-    kernel_value = 1.0
+# 多输出Kriging模型包装器
+struct MultiKrigingModel
+    models::Vector{KrigingModel}  # 4个单输出模型
+    feature_names::Vector{String}
+    output_names::Vector{String}
+end
+
+# RBF核函数
+function rbf_kernel(x1::AbstractVector{Float64}, x2::AbstractVector{Float64}, theta::Vector{Float64})
+    kernel_value = 0.0
     for d in 1:length(x1)
-        kernel_value *= exp(-theta[d] * (x1[d] - x2[d])^2)
+        kernel_value += theta[d] * (x1[d] - x2[d])^2
     end
-    return kernel_value
+    return exp(-kernel_value)
 end
 
-# 构建协方差矩阵
-function build_kernel_matrix(X, theta)
+# 改进的核矩阵构建（添加更强的正则化）
+function build_kernel_matrix_with_nugget(X::Matrix{Float64}, theta::Vector{Float64}, output_idx::Int)
     n = size(X, 1)
     K = zeros(n, n)
+    
+    # 构建核矩阵
     for i in 1:n, j in 1:n
-        K[i,j] = rbf_kernel(X[i,:], X[j,:], theta)
+        K[i, j] = rbf_kernel(vec(X[i, :]), vec(X[j, :]), theta)
     end
-    return K + 1e-8I  # 添加小的正则项保证数值稳定性
+    
+    # 根据输出类型设置不同的nugget
+    if output_idx <= 2
+        # 前两个输出：较小的nugget，因为这些输出变化较大
+        base_nugget = 1e-6
+    else
+        # 后两个输出：较大的nugget，因为它们是微小值，需要更平滑
+        base_nugget = 1e-5
+    end
+    
+    # 总是添加nugget避免完美拟合
+    K += base_nugget * I
+    
+    return K, base_nugget
 end
 
-# 修正的长度尺度参数分配（theta越大越重要）
-function get_physical_based_theta()
-    theta = zeros(5)
-    # 根据电池老化物理机制设置theta
-    # theta越大表示该特征对相似度计算的影响越大（越重要）
-    theta[1] = 1    # C_p_avg: 较低敏感性
-    theta[2] = 1    # C_n_avg: 较低敏感性
-    theta[3] = 1.5   # δ_SEI: 最高敏感性 - SEI厚度对老化影响最大
-    theta[4] = 1.5   # c_f: 最高敏感性 - 容量衰减是关键老化指标
-    theta[5] = 1.2    # P: 中等敏感性 - 功率影响老化速率
+# 基于物理的theta优化
+function optimize_theta_with_physics(X_norm::Matrix{Float64}, y_norm::Vector{Float64}, output_idx::Int)
+    d = size(X_norm, 2)
+    
+    # 基于物理的重要性权重
+    if output_idx == 1  # ΔC_p_avg
+        # 主要受C_p, δ_SEI, c_f影响
+        importance = [0.8, 0.2, 0.6, 0.6, 0.4]
+    elseif output_idx == 2  # ΔC_n_avg
+        # 主要受C_n, δ_SEI, c_f影响
+        importance = [0.2, 0.8, 0.6, 0.6, 0.4]
+    else  # 微小输出
+        # δ_SEI和c_f是关键
+        importance = [0.1, 0.1, 1.5, 1.5, 0.5]
+    end
+    
+    # 基于特征范围和重要性计算theta
+    theta = zeros(d)
+    for j in 1:d
+        # 计算特征的范围
+        x_range = maximum(X_norm[:, j]) - minimum(X_norm[:, j])
+        if x_range > 0
+            # 基本theta与特征范围成反比
+            base_theta = 1.0 / (x_range^2)
+            # 乘以重要性权重
+            theta[j] = base_theta * importance[j]
+        else
+            theta[j] = importance[j]
+        end
+    end
+    
+    # 确保theta在合理范围内
+    theta = clamp.(theta, 0.05, 5.0)
+    
     return theta
 end
 
-# 数据预处理：将不同数量级的数据调整到相近范围
-function preprocess_data(X, y; verbose=true)
-    if verbose
-        println("数据预处理: 调整不同特征到相近数量级...")
-    end
-    
-    # 输入特征缩放因子（基于特征典型值）
-    X_scaling_factors = [
-        1000.0,  # C_p_avg: 从千级别缩放到10级别
-        1000.0,  # C_n_avg: 从千级别缩放到10级别  
-        1.0,     # δ_SEI_nm: 保持nm单位（数值在合理范围）
-        10.0,    # c_f_Ah: 从10级别缩放到1级别
-        10.0     # P_kW: 从10级别缩放到1级别
-    ]
-    
-    # 输出特征缩放因子
-    y_scaling_factors = [
-        10.0,    # ΔC_p_avg: 从10级别缩放到1级别
-        10.0,    # ΔC_n_avg: 从10级别缩放到1级别
-        1.0,     # Δδ_SEI_pm: 保持pm单位（数值在合理范围）
-        1.0      # Δc_f_μAh: 保持μAh单位（数值在合理范围）
-    ]
-    
-    # 应用缩放
-    X_scaled = copy(X)
-    y_scaled = copy(y)
-    
-    for j in 1:size(X, 2)
-        X_scaled[:, j] .= X[:, j] ./ X_scaling_factors[j]
-    end
-    
-    for j in 1:size(y, 2)
-        y_scaled[:, j] .= y[:, j] ./ y_scaling_factors[j]
-    end
-    
-    if verbose
-        println("缩放后的输入数据范围:")
-        feature_names = ["C_p_avg", "C_n_avg", "δ_SEI_nm", "c_f_Ah", "P_kW"]
-        for i in 1:5
-            min_val = minimum(X_scaled[:, i])
-            max_val = maximum(X_scaled[:, i])
-            mean_val = mean(X_scaled[:, i])
-            println("  $(feature_names[i]): [$(round(min_val, digits=3)), $(round(max_val, digits=3))] | 均值: $(round(mean_val, digits=3))")
-        end
+# 计算适当的输出缩放因子
+function get_output_scaling_factor(output_idx::Int, y::Vector{Float64})
+    if output_idx <= 2
+        # ΔC_p_avg和ΔC_n_avg：不需要缩放
+        return 1.0
+    else
+        # 计算输出的绝对值中位数
+        y_abs = abs.(y)
+        y_nonzero = y_abs[y_abs .> 0]
         
-        println("缩放后的输出数据范围:")
-        output_names = ["ΔC_p_avg", "ΔC_n_avg", "Δδ_SEI_pm", "Δc_f_μAh"]
-        for i in 1:4
-            min_val = minimum(y_scaled[:, i])
-            max_val = maximum(y_scaled[:, i])
-            mean_val = mean(y_scaled[:, i])
-            println("  $(output_names[i]): [$(round(min_val, digits=3)), $(round(max_val, digits=3))] | 均值: $(round(mean_val, digits=3))")
+        if length(y_nonzero) > 0
+            y_median = median(y_nonzero)
+            # 目标缩放到数量级1
+            scale = 1.0 / y_median
+            # 限制缩放因子范围
+            scale = clamp(scale, 1e4, 1e7)
+            return scale
+        else
+            # 默认缩放因子
+            return output_idx == 3 ? 1e6 : 1e5
         end
     end
-    
-    return X_scaled, y_scaled, (X_scaling_factors, y_scaling_factors)
 end
 
-# 训练Kriging模型
-function train_kriging(X, y; verbose=true)
-    # 数据预处理：调整到相近数量级
+# 训练单输出Kriging模型
+function train_single_kriging(X::Matrix{Float64}, y::Vector{Float64}, 
+                              output_idx::Int; verbose=true)
     if verbose
-        println("训练Kriging模型...")
-    end
-    X_scaled, y_scaled, scaling_factors = preprocess_data(X, y, verbose=verbose)
-    
-    theta = get_physical_based_theta()
-    
-    if verbose
-        println("\n使用基于物理意义的长度尺度参数:")
-        feature_names = ["C_p_avg", "C_n_avg", "δ_SEI_nm", "c_f_Ah", "P_kW"]
-        for i in 1:length(theta)
-            importance = theta[i]  # theta越大越重要
-            println("  $(feature_names[i]): θ = $(theta[i]) | 重要性: $(round(importance, digits=2))")
-        end
+        println("\n训练第$(output_idx)个输出模型: $(output_idx <= 2 ? "ΔC" : "微小输出")")
     end
     
-    # 数据标准化（在缩放后的数据上进行）
-    X_mean = mean(X_scaled, dims=1)
-    X_std = std(X_scaled, dims=1)
+    # 输入标准化
+    X_mean = vec(mean(X, dims=1))
+    X_std = vec(std(X, dims=1))
     X_std[X_std .== 0] .= 1.0
-    X_norm = (X_scaled .- X_mean) ./ X_std
+    X_norm = (X .- X_mean') ./ X_std'
     
-    y_mean = mean(y_scaled, dims=1)
-    y_std = std(y_scaled, dims=1)
-    y_std[y_std .== 0] .= 1.0
-    y_norm = (y_scaled .- y_mean) ./ y_std
-    
-    # 构建核矩阵并求解权重
-    if verbose
-        println("构建核矩阵...")
-    end
-    K = build_kernel_matrix(X_norm, theta)
+    # 输出缩放
+    scaling_factor = get_output_scaling_factor(output_idx, y)
+    y_scaled = y .* scaling_factor
     
     if verbose
-        println("求解权重矩阵...")
+        println("  输出缩放因子: $(round(scaling_factor, digits=2))")
+        println("  缩放后输出范围: [$(round(minimum(y_scaled), digits=4)), $(round(maximum(y_scaled), digits=4))]")
     end
+    
+    # 输出标准化
+    y_mean = mean(y_scaled)
+    y_std = std(y_scaled)
+    if y_std == 0
+        y_std = 1.0
+    end
+    y_norm = (y_scaled .- y_mean) / y_std
+    
+    # 优化theta参数（基于物理）
+    theta = optimize_theta_with_physics(X_norm, y_norm, output_idx)
+    
+    if verbose
+        println("  优化的theta: $(round.(theta, digits=3))")
+    end
+    
+    # 构建核矩阵
+    K, nugget = build_kernel_matrix_with_nugget(X_norm, theta, output_idx)
+    
+    # 求解权重
     alpha = K \ y_norm
     
-    norm_params = (X_mean=X_mean, X_std=X_std, y_mean=y_mean, y_std=y_std)
-    model = KrigingModel(X_norm, y_norm, theta, alpha, scaling_factors, norm_params)
+    # 计算训练误差
+    y_pred_norm = K * alpha
+    y_pred_scaled = y_pred_norm .* y_std .+ y_mean
+    y_pred = y_pred_scaled ./ scaling_factor
+    
+    mae = mean(abs.(y_pred .- y))
+    rmse = sqrt(mean((y_pred .- y).^2))
     
     if verbose
-        println("Kriging模型训练完成!")
+        cond_K = cond(K)
+        println("  核矩阵条件数: $(round(cond_K, digits=2))")
+        println("  nugget值: $(nugget)")
+        println("  训练误差: MAE=$(round(mae, digits=10)), RMSE=$(round(rmse, digits=10))")
     end
+    
+    # 创建模型
+    model = KrigingModel(X_norm, y_norm, theta, alpha, X_mean, X_std, 
+                         y_mean, y_std, nugget, scaling_factor)
     
     return model
 end
 
-# 预测函数（包含缩放和反缩放）
-function predict(model::KrigingModel, X_new)
-    # 首先应用预处理缩放
-    X_scaling_factors = model.scaling_factors[1]
-    X_scaled = copy(X_new)
-    
-    for j in 1:size(X_new, 2)
-        X_scaled[:, j] .= X_new[:, j] ./ X_scaling_factors[j]
+# 训练多输出Kriging模型
+function train_kriging(X::Matrix{Float64}, y::Matrix{Float64}; verbose=true)
+    if verbose
+        println("="^60)
+        println("训练Kriging模型（多输出）...")
+        println("输入维度: $(size(X))")
+        println("输出维度: $(size(y))")
     end
     
-    # 然后应用标准化
-    X_norm = (X_scaled .- model.norm_params.X_mean) ./ model.norm_params.X_std
+    n_outputs = size(y, 2)
+    models = Vector{KrigingModel}(undef, n_outputs)
     
+    for i in 1:n_outputs
+        models[i] = train_single_kriging(X, y[:, i], i, verbose=verbose)
+    end
+    
+    # 特征和输出名称
+    feature_names = ["C_p_avg", "C_n_avg", "δ_SEI_nm", "c_f_Ah", "P_kW"]
+    output_names = ["ΔC_p_avg", "ΔC_n_avg", "Δδ_SEI_pm", "Δc_f_μAh"]
+    
+    multi_model = MultiKrigingModel(models, feature_names, output_names)
+    
+    if verbose
+        println("="^60)
+        println("Kriging模型训练完成!")
+    end
+    
+    return multi_model
+end
+
+# 单模型预测
+function predict(model::KrigingModel, X_new::Matrix{Float64})
     n_test = size(X_new, 1)
-    n_outputs = size(model.y_train, 2)
-    predictions_scaled = zeros(n_test, n_outputs)
+    predictions = zeros(n_test)
     
+    # 对输入进行标准化
+    X_new_norm = (X_new .- model.X_mean') ./ model.X_std'
+    
+    # 对每个测试点进行预测
     for i in 1:n_test
-        k_star = [rbf_kernel(X_norm[i,:], model.X_train[j,:], model.theta) 
-                 for j in 1:size(model.X_train,1)]
+        # 计算与所有训练样本的相似度
+        k_star = zeros(size(model.X_train, 1))
+        for j in 1:size(model.X_train, 1)
+            k_star[j] = rbf_kernel(vec(X_new_norm[i, :]), vec(model.X_train[j, :]), model.theta)
+        end
         
-        y_pred_norm = k_star' * model.alpha
-        predictions_scaled[i,:] = y_pred_norm .* model.norm_params.y_std .+ model.norm_params.y_mean
-    end
-    
-    # 最后反缩放预测结果
-    y_scaling_factors = model.scaling_factors[2]
-    predictions = copy(predictions_scaled)
-    
-    for j in 1:size(predictions, 2)
-        predictions[:, j] .= predictions_scaled[:, j] .* y_scaling_factors[j]
+        # 预测（标准化空间）
+        y_pred_norm = dot(k_star, model.alpha)
+        
+        # 反标准化和反缩放
+        y_pred_scaled = y_pred_norm * model.y_std + model.y_mean
+        predictions[i] = y_pred_scaled / model.output_scaling_factor
     end
     
     return predictions
 end
 
-# 方便的预测函数（针对单个输入）
-function predict_single(model::KrigingModel, state, power)
-    """
-    针对单个状态和功率进行预测
-    state: [C_p_avg, C_n_avg, δ_SEI, c_f]
-    power: 功率值 (kW)
-    """
+# 多模型预测
+function predict(multi_model::MultiKrigingModel, X_new::Matrix{Float64})
+    n_test = size(X_new, 1)
+    n_outputs = length(multi_model.models)
+    predictions = zeros(n_test, n_outputs)
+    
+    for i in 1:n_outputs
+        predictions[:, i] = predict(multi_model.models[i], X_new)
+    end
+    
+    return predictions
+end
+
+# 针对单个输入的预测
+function predict_single(multi_model::MultiKrigingModel, state::Vector{Float64}, power::Float64)
     input_vec = [state[1], state[2], state[3], state[4], power]
     input_mat = reshape(input_vec, 1, :)
-    prediction = predict(model, input_mat)
+    prediction = predict(multi_model, input_mat)
     return prediction[1, :]
 end
 
-# 使用函数（创建预测器）
-function use_kriging_model(model::KrigingModel)
-    """
-    创建一个方便的Kriging预测器函数
-    返回的函数接受state和power，返回状态增量
-    """
-    function predict_state_increment(state, power)
-        return predict_single(model, state, power)
+# 创建预测器
+function use_kriging_model(multi_model::MultiKrigingModel)
+    function predict_state_increment(state::Vector{Float64}, power::Float64)
+        return predict_single(multi_model, state, power)
     end
     return predict_state_increment
 end
 
 # 加载训练数据
-function load_training_data(data_path="D:\\vscode codes\\demo-script\\spm_training_data.csv")
-    """
-    从CSV文件加载训练数据
-    """
+function load_training_data(data_path="spm_training_data.csv")
     println("从 $data_path 加载训练数据...")
     
-    # 加载现有数据
     df = CSV.read(data_path, DataFrame)
     
-    inputs = Matrix(df[:, [:C_p_avg, :C_n_avg, :δ_SEI_nm, :c_f_Ah, :P_kW]])
-    outputs = Matrix(df[:, [:ΔC_p_avg, :ΔC_n_avg, :Δδ_SEI_pm, :Δc_f_μAh]])
+    println("CSV列名: $(names(df))")
+    println("CSV维度: $(size(df,1)) 行 × $(size(df,2)) 列")
     
-    # 时间尺度放大到一周（保持原始单位）
-    time_scale_factor = 168.0
-    outputs .*= time_scale_factor
+    inputs = Matrix{Float64}(df[:, 1:5])  # 前5列是输入
+    outputs = Matrix{Float64}(df[:, 6:9]) # 后4列是输出
     
     println("数据维度: $(size(inputs,1)) 样本, $(size(inputs,2)) 特征")
     
     return inputs, outputs
 end
 
-# 数据验证函数
-function validate_training_data(inputs, outputs)
+# 数据验证
+function validate_training_data(inputs::Matrix{Float64}, outputs::Matrix{Float64})
     println("\n原始训练数据验证:")
     println("输入数据范围:")
     feature_names = ["C_p_avg", "C_n_avg", "δ_SEI_nm", "c_f_Ah", "P_kW"]
@@ -253,42 +302,88 @@ function validate_training_data(inputs, outputs)
         println("  $(feature_names[i]): [$(round(min_val, digits=2)), $(round(max_val, digits=2))] | 均值: $(round(mean_val, digits=2))")
     end
     
-    println("\n输出数据范围(一周增量):")
+    println("\n输出数据范围:")
     output_names = ["ΔC_p_avg", "ΔC_n_avg", "Δδ_SEI_pm", "Δc_f_μAh"]
     for i in 1:4
         min_val = minimum(outputs[:,i])
         max_val = maximum(outputs[:,i])
         mean_val = mean(outputs[:,i])
-        println("  $(output_names[i]): [$(round(min_val, digits=6)), $(round(max_val, digits=6))] | 均值: $(round(mean_val, digits=6))")
+        println("  $(output_names[i]): [$(round(min_val, digits=10)), $(round(max_val, digits=10))] | 均值: $(round(mean_val, digits=10))")
     end
 end
 
 # 分析特征重要性
-function analyze_feature_importance(model::KrigingModel, feature_names=["C_p_avg", "C_n_avg", "δ_SEI_nm", "c_f_Ah", "P_kW"])
+function analyze_feature_importance(multi_model::MultiKrigingModel)
     println("\n特征重要性分析:")
-    println("θ值越大表示特征越重要")
+    println("θ值越大表示特征对相似度计算的影响越大")
     println("-" ^ 50)
     
-    for i in 1:length(model.theta)
-        importance = model.theta[i]
-        println("$(feature_names[i]): θ=$(model.theta[i]) | 重要性: $(round(importance, digits=2))")
-    end
+    feature_names = multi_model.feature_names
+    n_models = length(multi_model.models)
     
-    # 计算相对重要性百分比
-    total_theta = sum(model.theta)
-    println("\n相对重要性(百分比):")
-    for i in 1:length(model.theta)
-        relative_importance = model.theta[i] / total_theta * 100
-        println("  $(feature_names[i]): $(round(relative_importance, digits=1))%")
+    for i in 1:n_models
+        println("\n模型 $(multi_model.output_names[i]):")
+        theta = multi_model.models[i].theta
+        for j in 1:length(theta)
+            println("  $(feature_names[j]): θ=$(round(theta[j], digits=4))")
+        end
+        
+        total_theta = sum(theta)
+        if total_theta > 0
+            println("  相对重要性(百分比):")
+            for j in 1:length(theta)
+                relative_importance = theta[j] / total_theta * 100
+                println("    $(feature_names[j]): $(round(relative_importance, digits=1))%")
+            end
+        end
+    end
+end
+
+# 模型评估
+function evaluate_model(multi_model::MultiKrigingModel, inputs::Matrix{Float64}, outputs::Matrix{Float64})
+    println("\n模型评估:")
+    println("="^60)
+    
+    # 预测所有训练数据
+    predictions = predict(multi_model, inputs)
+    
+    # 计算每个输出的误差指标
+    for i in 1:size(outputs, 2)
+        actual = outputs[:, i]
+        pred = predictions[:, i]
+        
+        # 计算各种误差指标
+        mae = mean(abs.(pred .- actual))
+        rmse = sqrt(mean((pred .- actual).^2))
+        
+        if i >= 3
+            # 微小输出：显示绝对误差
+            println("\n$(multi_model.output_names[i]):")
+            println("  平均绝对误差: $(round(mae, digits=12))")
+            println("  RMSE: $(round(rmse, digits=12))")
+            
+            # 计算相对误差（仅对非零值）
+            non_zero_idx = findall(abs.(actual) .> 1e-12)
+            if length(non_zero_idx) > 0
+                mape = mean(abs.((pred[non_zero_idx] .- actual[non_zero_idx]) ./ actual[non_zero_idx])) * 100
+                println("  平均相对误差（非零值）: $(round(mape, digits=2))%")
+            end
+        else
+            # 常规输出
+            mape = mean(abs.((pred .- actual) ./ (abs.(actual) .+ 1e-10))) * 100
+            r2 = 1 - sum((pred .- actual).^2) / sum((actual .- mean(actual)).^2)
+            
+            println("\n$(multi_model.output_names[i]):")
+            println("  MAE: $(round(mae, digits=6))")
+            println("  RMSE: $(round(rmse, digits=6))")
+            println("  MAPE: $(round(mape, digits=2))%")
+            println("  R²: $(round(r2, digits=4))")
+        end
     end
 end
 
 # 创建并训练模型的便捷函数
 function create_and_train_kriging_model(data_path="spm_training_data.csv"; verbose=true)
-    """
-    一站式函数：加载数据并训练Kriging模型
-    返回模型和预测器
-    """
     if verbose
         println("="^60)
         println("开始训练Kriging代理模型")
@@ -304,23 +399,51 @@ function create_and_train_kriging_model(data_path="spm_training_data.csv"; verbo
     end
     
     # 训练模型
-    model = train_kriging(inputs, outputs, verbose=verbose)
+    multi_model = train_kriging(inputs, outputs, verbose=verbose)
     
     # 分析特征重要性
     if verbose
-        analyze_feature_importance(model)
+        analyze_feature_importance(multi_model)
     end
     
     # 创建预测器
-    predictor = use_kriging_model(model)
+    predictor = use_kriging_model(multi_model)
     
     if verbose
         println("\n" * "="^60)
         println("Kriging模型训练完成!")
         println("="^60)
         
+        # 模型评估
+        evaluate_model(multi_model, inputs, outputs)
+        
         # 测试预测
-        println("\n模型预测测试(一周增量):")
+        println("\n模型验证测试（使用训练数据的前5个样本）:")
+        for i in 1:min(5, size(inputs, 1))
+            state = inputs[i, 1:4]
+            power = inputs[i, 5]
+            actual = outputs[i, :]
+            pred = predictor(state, power)
+            
+            println("\n样本 $i:")
+            println("  输入: C_p=$(round(state[1], digits=2)), C_n=$(round(state[2], digits=2)), δ_SEI=$(round(state[3], digits=2))nm, c_f=$(round(state[4], digits=2))Ah, P=$(round(power, digits=2))kW")
+            println("  实际输出: ΔC_p=$(round(actual[1], digits=6)), ΔC_n=$(round(actual[2], digits=6)), Δδ_SEI=$(round(actual[3], digits=10)), Δc_f=$(round(actual[4], digits=10))")
+            println("  预测输出: ΔC_p=$(round(pred[1], digits=6)), ΔC_n=$(round(pred[2], digits=6)), Δδ_SEI=$(round(pred[3], digits=10)), Δc_f=$(round(pred[4], digits=10))")
+            
+            # 计算相对误差
+            errors = zeros(4)
+            for j in 1:4
+                if abs(actual[j]) > 1e-10
+                    errors[j] = abs(pred[j] - actual[j]) / abs(actual[j]) * 100
+                else
+                    errors[j] = abs(pred[j] - actual[j]) * 100
+                end
+            end
+            println("  相对误差(%): $(round(errors[1], digits=2))%, $(round(errors[2], digits=2))%, $(round(errors[3], digits=2))%, $(round(errors[4], digits=2))%")
+        end
+        
+        # 额外测试点
+        println("\n额外测试点预测:")
         test_points = [
             ([6520.5, 11202.4, 15.2, 21.5], -23.1, "示例1-充电"),
             ([5899.5, 12676.4, 44.8, 7.5], -23.3, "示例2-充电"), 
@@ -330,36 +453,16 @@ function create_and_train_kriging_model(data_path="spm_training_data.csv"; verbo
         for (state, power, desc) in test_points
             pred = predictor(state, power)
             println("\n$desc:")
-            println("  输入: C_p=$(state[1]), C_n=$(state[2]), δ_SEI=$(state[3])nm, c_f=$(state[4])Ah, P=$(power)kW")
-            println("  预测增量（一周）:")
-            println("    ΔC_p_avg: $(round(pred[1], digits=3))")
-            println("    ΔC_n_avg: $(round(pred[2], digits=3))") 
-            println("    Δδ_SEI: $(round(pred[3], digits=6)) pm")
-            println("    Δc_f: $(round(pred[4], digits=6)) μAh")
+            println("  输入: C_p=$(state[1]), C_n=$(state[2]), δ_SEI=$(round(state[3], digits=2))nm, c_f=$(round(state[4], digits=2))Ah, P=$(round(power, digits=2))kW")
+            println("  预测增量:")
+            println("    ΔC_p_avg: $(round(pred[1], digits=6))")
+            println("    ΔC_n_avg: $(round(pred[2], digits=6))") 
+            println("    Δδ_SEI: $(round(pred[3], digits=10)) pm")
+            println("    Δc_f: $(round(pred[4], digits=10)) μAh")
         end
     end
     
-    return model, predictor
-end
-
-# 保存模型到文件（使用CSV格式简化版本）
-function save_model_simple(model::KrigingModel, base_path="kriging_model")
-    """
-    简化版模型保存，将模型参数保存为CSV文件
-    """
-    # 保存模型参数
-    CSV.write("$(base_path)_params.csv", DataFrame(
-        parameter = ["theta_1", "theta_2", "theta_3", "theta_4", "theta_5"],
-        value = model.theta
-    ))
-    
-    # 保存缩放因子
-    CSV.write("$(base_path)_scaling.csv", DataFrame(
-        X_scaling_factors = model.scaling_factors[1],
-        y_scaling_factors = model.scaling_factors[2]
-    ))
-    
-    println("模型参数已保存到 $(base_path)_*.csv 文件")
+    return multi_model, predictor
 end
 
 # 模块初始化代码

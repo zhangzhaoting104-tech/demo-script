@@ -208,7 +208,7 @@ function calculate_SPM_state_increment(params::SPMParameters, state, input, dt=1
 end
 
 # 批量生成训练数据的函数
-function generate_training_data(params::SPMParameters, num_samples=1000; dt=1.0)
+function generate_training_data(params::SPMParameters, num_samples=100; dt=1.0)
     """
     生成用于Kriging模型训练的数据
     返回: (inputs, outputs)
@@ -270,7 +270,7 @@ function main()
     params = create_default_SPM_parameters()
     
     # 生成训练数据
-    num_samples = 1000
+    num_samples = 100
     println("生成 $num_samples 个训练样本...")
     inputs, outputs = generate_training_data(params, num_samples)
     

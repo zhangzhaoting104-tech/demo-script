@@ -1,7 +1,7 @@
 using JuMP, Ipopt, DataFrames, LinearAlgebra, Statistics, CSV
 
 # 包含Kriging模型定义和训练
-include("D:\\vscode codes\\demo-script\\.github\\workflows\\Kriging.jl")
+include("D:\\vscode codes\\demo-script\\.github\\workflows\\Kriging_module.jl")
 
 # 系统参数
 const K = 21                    # 电池总数
@@ -60,7 +60,7 @@ function solve_bss_optimization(
 )
     """
     求解BSS优化问题 - 简化版
-    使用外部Kriging预测，避免在JuMP中集成复杂非线性函数
+    使用外部Kriging预测,避免在JuMP中集成复杂非线性函数
     """
     println("开始求解BSS优化问题...")
     
